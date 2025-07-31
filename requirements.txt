@@ -1,0 +1,20 @@
+# Core detection dependencies
+opencv-python>=4.8.0
+ultralytics>=8.0.0
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.21.0
+Pillow>=9.0.0
+
+# Web interface dependencies
+flask>=2.3.0
+flask-socketio>=5.3.0
+python-socketio>=5.8.0
+eventlet>=0.33.0
+
+# Data handling
+pandas>=2.0.0
+python-dateutil>=2.8.0
+
+# Development and utilities
+python-dotenv>=1.0.0 
