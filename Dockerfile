@@ -28,5 +28,5 @@ RUN mkdir -p static/detections logs
 # Expose port
 EXPOSE $PORT
 
-# Run the application
-CMD gunicorn --bind 0.0.0.0:$PORT drone_dashboard:app 
+# Run the application with longer timeout for ML model loading
+CMD gunicorn --bind 0.0.0.0:$PORT --timeout 120 --workers 1 --threads 2 drone_dashboard:app 

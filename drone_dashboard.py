@@ -35,8 +35,9 @@ class DroneDashboard:
         self.drones = {}
         self.detection_history = []
         
-        # Load detection model
-        self.load_detection_model()
+        # Lazy load detection model
+        self.model = None
+        self.model_loaded = False
         
         # Webcam variables
         self.webcam = None
@@ -105,259 +106,296 @@ class DroneDashboard:
         print("✅ Database initialized")
     
     def load_detection_model(self):
-        """Load the detection model"""
+        """Load the detection model (lazy loading)"""
+        if self.model_loaded:
+            return self.model
+            
         try:
-            # Try to load the trained car crash detection model
-            car_crash_model_path = "models/car_crash_detection2/weights/best.pt"
-            if Path(car_crash_model_path).exists():
-                self.detection_model = YOLO(car_crash_model_path)
-                print("✅ Detection model loaded successfully")
-            else:
-                print("⚠️ Detection model not found")
-                self.detection_model = None
+            print("🔄 Loading detection model...")
+            # Try to load from a local path first
+            try:
+                model_path = "models/emergency_detection.pt"
+                if os.path.exists(model_path):
+                    self.model = YOLO(model_path)
+                else:
+                    # Use a lightweight model for testing
+                    self.model = YOLO('yolov8n.pt')  # Use nano model for speed
+                    print("⚠️ Using default YOLO model for testing")
+            except Exception as e:
+                print(f"⚠️ Error loading custom model: {e}")
+                # Fallback to default model
+                self.model = YOLO('yolov8n.pt')
+                print("✅ Using fallback YOLO model")
+            
+            self.model_loaded = True
+            print("✅ Detection model loaded successfully")
+            return self.model
+            
         except Exception as e:
             print(f"❌ Error loading detection model: {e}")
-            self.detection_model = None
+            self.model = None
+            self.model_loaded = False
+            return None
     
     def start_webcam(self):
-        """Start webcam for testing"""
+        """Start webcam capture"""
         try:
             self.webcam = cv2.VideoCapture(0)
-            if not self.webcam.isOpened():
-                print("❌ Could not open webcam")
+            if self.webcam.isOpened():
+                self.webcam_active = True
+                print("📹 Webcam started")
+                return True
+            else:
+                print("❌ Failed to start webcam")
                 return False
-            
-            self.webcam_active = True
-            print("📹 Webcam started successfully")
-            return True
         except Exception as e:
             print(f"❌ Error starting webcam: {e}")
             return False
     
     def stop_webcam(self):
-        """Stop webcam"""
+        """Stop webcam capture"""
         if self.webcam:
             self.webcam.release()
-            self.webcam = None
         self.webcam_active = False
         print("📹 Webcam stopped")
     
     def process_webcam_frame(self, frame):
         """Process a webcam frame for detections"""
-        if not self.detection_model:
-            return None, []
-        
         try:
-            # Run detection on frame
-            results = self.detection_model(frame)
+            # Load model if not loaded
+            model = self.load_detection_model()
+            if not model:
+                return [], frame
+            
+            # Run detection
+            results = model(frame)
             
             detections = []
+            processed_frame = frame.copy()
+            
             for result in results:
                 boxes = result.boxes
                 if boxes is not None:
                     for box in boxes:
-                        # Get detection info
-                        cls = int(box.cls[0])
-                        conf = float(box.conf[0])
-                        coords = box.xyxy[0].cpu().numpy()
+                        # Get box coordinates
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        confidence = float(box.conf[0])
+                        class_id = int(box.cls[0])
+                        class_name = result.names[class_id]
                         
-                        # Get class name
-                        class_name = result.names[cls]
-                        
-                        if conf > 0.3:  # Confidence threshold
+                        # Filter for emergency-related classes
+                        emergency_classes = ['person', 'fire', 'smoke', 'car', 'truck', 'bus']
+                        if any(emergency in class_name.lower() for emergency in emergency_classes):
                             detection = {
                                 'type': class_name,
-                                'confidence': conf,
-                                'bbox': coords.tolist(),
-                                'class_id': cls
+                                'confidence': confidence,
+                                'bbox': [int(x1), int(y1), int(x2), int(y2)]
                             }
                             detections.append(detection)
+                            
+                            # Draw bounding box
+                            cv2.rectangle(processed_frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)
+                            cv2.putText(processed_frame, f"{class_name} {confidence:.2f}", 
+                                      (int(x1), int(y1) - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                            
+                            print(f"🚨 Detection: {class_name} by webcam_test (confidence: {confidence:.2f})")
             
-            return frame, detections
+            return detections, processed_frame
             
         except Exception as e:
             print(f"❌ Error processing frame: {e}")
-            return frame, []
+            return [], frame
     
     def add_detection(self, drone_id, detection_type, confidence, location=None, image=None, bbox=None, reason=""):
-        """Add a new detection to the database"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Save detection to database
-        cursor.execute('''
-            INSERT INTO detections (drone_id, detection_type, confidence, location_lat, location_lng, bbox, reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (drone_id, detection_type, confidence, location[0] if location else None, 
-              location[1] if location else None, json.dumps(bbox) if bbox else None, reason))
-        
-        detection_id = cursor.lastrowid
-        
-        # Save image if provided
-        image_path = None
-        if image is not None:
-            image_path = f"static/detections/detection_{detection_id}.jpg"
-            Path("static/detections").mkdir(exist_ok=True)
-            cv2.imwrite(image_path, image)
+        """Add a detection to the database"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
             
-            # Update database with image path
-            cursor.execute('UPDATE detections SET image_path = ? WHERE id = ?', (image_path, detection_id))
-        
-        conn.commit()
-        conn.close()
-        
-        # Create detection record
-        detection = {
-            'id': detection_id,
-            'drone_id': drone_id,
-            'type': detection_type,
-            'confidence': confidence,
-            'location': location,
-            'timestamp': datetime.datetime.now().isoformat(),
-            'image_path': image_path,
-            'bbox': bbox,
-            'reason': reason
-        }
-        
-        # Add to history
-        self.detection_history.append(detection)
-        
-        # Emit to connected clients
-        socketio.emit('new_detection', detection)
-        
-        print(f"🚨 Detection: {detection_type} by {drone_id} (confidence: {confidence:.2f})")
-        return detection
+            # Save image if provided
+            image_path = None
+            if image is not None:
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                image_path = f"static/detections/detection_{timestamp}.jpg"
+                os.makedirs("static/detections", exist_ok=True)
+                cv2.imwrite(image_path, image)
+            
+            # Insert detection
+            cursor.execute('''
+                INSERT INTO detections (drone_id, detection_type, confidence, location_lat, location_lng, image_path, bbox, reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (drone_id, detection_type, confidence, 
+                  location.get('lat') if location else None,
+                  location.get('lng') if location else None,
+                  image_path, json.dumps(bbox) if bbox else None, reason))
+            
+            detection_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+            
+            # Add to history
+            detection = {
+                'id': detection_id,
+                'drone_id': drone_id,
+                'type': detection_type,
+                'confidence': confidence,
+                'timestamp': datetime.datetime.now().isoformat(),
+                'image_path': image_path,
+                'bbox': bbox,
+                'reason': reason
+            }
+            self.detection_history.append(detection)
+            
+            # Emit real-time update
+            socketio.emit('new_detection', detection)
+            
+            return detection
+            
+        except Exception as e:
+            print(f"❌ Error adding detection: {e}")
+            return None
     
     def get_detections(self, limit=100):
         """Get recent detections from database"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT id, drone_id, detection_type, confidence, location_lat, location_lng, 
-                   timestamp, image_path, bbox, reason
-            FROM detections 
-            ORDER BY timestamp DESC 
-            LIMIT ?
-        ''', (limit,))
-        
-        detections = []
-        for row in cursor.fetchall():
-            detection = {
-                'id': row[0],
-                'drone_id': row[1],
-                'type': row[2],
-                'confidence': row[3],
-                'location': (row[4], row[5]) if row[4] and row[5] else None,
-                'timestamp': row[6],
-                'image_path': row[7],
-                'bbox': json.loads(row[8]) if row[8] else None,
-                'reason': row[9]
-            }
-            detections.append(detection)
-        
-        conn.close()
-        return detections
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT id, drone_id, detection_type, confidence, timestamp, image_path, bbox, reason
+                FROM detections
+                ORDER BY timestamp DESC
+                LIMIT ?
+            ''', (limit,))
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            detections = []
+            for row in rows:
+                detection = {
+                    'id': row[0],
+                    'drone_id': row[1],
+                    'type': row[2],
+                    'confidence': row[3],
+                    'timestamp': row[4],
+                    'image_path': row[5],
+                    'bbox': json.loads(row[6]) if row[6] else None,
+                    'reason': row[7]
+                }
+                detections.append(detection)
+            
+            return detections
+            
+        except Exception as e:
+            print(f"❌ Error getting detections: {e}")
+            return []
     
     def get_detection_stats(self):
         """Get detection statistics"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        # Total detections
-        cursor.execute('SELECT COUNT(*) FROM detections')
-        total_detections = cursor.fetchone()[0]
-        
-        # Detections by type
-        cursor.execute('''
-            SELECT detection_type, COUNT(*) 
-            FROM detections 
-            GROUP BY detection_type
-        ''')
-        detections_by_type = dict(cursor.fetchall())
-        
-        # Recent detections (last 24 hours)
-        cursor.execute('''
-            SELECT COUNT(*) 
-            FROM detections 
-            WHERE timestamp > datetime('now', '-1 day')
-        ''')
-        recent_detections = cursor.fetchone()[0]
-        
-        # Active drones
-        cursor.execute('''
-            SELECT COUNT(*) 
-            FROM drones 
-            WHERE status = 'active'
-        ''')
-        active_drones = cursor.fetchone()[0]
-        
-        conn.close()
-        
-        return {
-            'total_detections': total_detections,
-            'detections_by_type': detections_by_type,
-            'recent_detections': recent_detections,
-            'active_drones': active_drones
-        }
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Total detections
+            cursor.execute('SELECT COUNT(*) FROM detections')
+            total_detections = cursor.fetchone()[0]
+            
+            # Detections by type
+            cursor.execute('''
+                SELECT detection_type, COUNT(*) 
+                FROM detections 
+                GROUP BY detection_type
+            ''')
+            detections_by_type = dict(cursor.fetchall())
+            
+            # Recent detections (last 24 hours)
+            cursor.execute('''
+                SELECT COUNT(*) FROM detections 
+                WHERE timestamp >= datetime('now', '-1 day')
+            ''')
+            recent_detections = cursor.fetchone()[0]
+            
+            conn.close()
+            
+            return {
+                'total_detections': total_detections,
+                'detections_by_type': detections_by_type,
+                'recent_detections': recent_detections,
+                'webcam_tests': len([d for d in self.detection_history if d['drone_id'] == 'webcam_test'])
+            }
+            
+        except Exception as e:
+            print(f"❌ Error getting stats: {e}")
+            return {
+                'total_detections': 0,
+                'detections_by_type': {},
+                'recent_detections': 0,
+                'webcam_tests': 0
+            }
     
     def register_drone(self, drone_id, name, location=None):
         """Register a new drone"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO drones (id, name, location_lat, location_lng)
-            VALUES (?, ?, ?, ?)
-        ''', (drone_id, name, location[0] if location else None, location[1] if location else None))
-        
-        conn.commit()
-        conn.close()
-        
-        # Update drones dict
-        self.drones[drone_id] = {
-            'id': drone_id,
-            'name': name,
-            'status': 'active',
-            'location': location,
-            'last_seen': datetime.datetime.now()
-        }
-        
-        socketio.emit('drone_registered', self.drones[drone_id])
-        print(f"✅ Drone registered: {name} ({drone_id})")
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                INSERT OR REPLACE INTO drones (id, name, location_lat, location_lng)
+                VALUES (?, ?, ?, ?)
+            ''', (drone_id, name, 
+                  location.get('lat') if location else None,
+                  location.get('lng') if location else None))
+            
+            conn.commit()
+            conn.close()
+            
+            self.drones[drone_id] = {
+                'id': drone_id,
+                'name': name,
+                'status': 'active',
+                'location': location
+            }
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error registering drone: {e}")
+            return False
     
     def update_drone_status(self, drone_id, status, location=None, battery_level=None):
         """Update drone status"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            UPDATE drones 
-            SET status = ?, location_lat = ?, location_lng = ?, battery_level = ?, last_seen = CURRENT_TIMESTAMP
-            WHERE id = ?
-        ''', (status, location[0] if location else None, location[1] if location else None, 
-              battery_level, drone_id))
-        
-        conn.commit()
-        conn.close()
-        
-        # Update drones dict
-        if drone_id in self.drones:
-            self.drones[drone_id].update({
-                'status': status,
-                'location': location,
-                'battery_level': battery_level,
-                'last_seen': datetime.datetime.now()
-            })
-        
-        socketio.emit('drone_status_update', {
-            'drone_id': drone_id,
-            'status': status,
-            'location': location,
-            'battery_level': battery_level
-        })
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                UPDATE drones 
+                SET status = ?, location_lat = ?, location_lng = ?, battery_level = ?, last_seen = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (status, 
+                  location.get('lat') if location else None,
+                  location.get('lng') if location else None,
+                  battery_level,
+                  drone_id))
+            
+            conn.commit()
+            conn.close()
+            
+            if drone_id in self.drones:
+                self.drones[drone_id].update({
+                    'status': status,
+                    'location': location,
+                    'battery_level': battery_level
+                })
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error updating drone status: {e}")
+            return False
 
-# Global dashboard instance
+# Initialize dashboard
 dashboard = DroneDashboard()
 
 @app.route('/')
@@ -373,8 +411,7 @@ def webcam_page():
 @app.route('/api/detections')
 def api_detections():
     """API endpoint for getting detections"""
-    limit = request.args.get('limit', 100, type=int)
-    detections = dashboard.get_detections(limit)
+    detections = dashboard.get_detections()
     return jsonify(detections)
 
 @app.route('/api/stats')
@@ -397,18 +434,22 @@ def api_stop_webcam():
 
 @app.route('/api/process_frame', methods=['POST'])
 def api_process_frame():
-    """API endpoint for processing a webcam frame"""
+    """API endpoint for processing webcam frame"""
     try:
-        # Get base64 image data
         data = request.json
-        image_data = base64.b64decode(data['image'].split(',')[1])
+        frame_data = data.get('frame')
         
-        # Convert to OpenCV format
-        nparr = np.frombuffer(image_data, np.uint8)
-        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if not frame_data:
+            return jsonify({'success': False, 'error': 'No frame data provided'})
+        
+        # Decode base64 frame
+        frame_data = frame_data.split(',')[1]  # Remove data URL prefix
+        frame_bytes = base64.b64decode(frame_data)
+        frame_array = np.frombuffer(frame_bytes, dtype=np.uint8)
+        frame = cv2.imdecode(frame_array, cv2.IMREAD_COLOR)
         
         # Process frame
-        processed_frame, detections = dashboard.process_webcam_frame(frame)
+        detections, processed_frame = dashboard.process_webcam_frame(frame)
         
         # Convert processed frame back to base64
         _, buffer = cv2.imencode('.jpg', processed_frame)
