@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drone Emergency Detection Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        .emergency-card {
+            border-left: 4px solid #dc3545;
+            background: linear-gradient(135deg, #fff5f5 0%, #ffe6e6 100%);
+        }
+        .detection-card {
+            border-left: 4px solid #007bff;
+            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+        }
+        .detection-type {
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            font-size: 0.875rem;
+            font-weight: bold;
+        }
+        .type-car_crash { background-color: #ffc107; color: #000; }
+        .type-fire { background-color: #dc3545; color: #fff; }
+        .type-person_down { background-color: #6f42c1; color: #fff; }
+        .type-medical_emergency { background-color: #fd7e14; color: #fff; }
+        
+        .real-time-feed {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .detection-image {
+            max-width: 200px;
+            max-height: 150px;
+            border-radius: 0.5rem;
+        }
+        
+        .stats-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-dark">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="#">
+                <i class="fas fa-drone"></i> Drone Emergency Detection Dashboard
+            </a>
+            <div class="navbar-nav ms-auto">
+                <a class="nav-link" href="/webcam">
+                    <i class="fas fa-video"></i> Webcam Test
+                </a>
+                <span class="navbar-text">
+                    <i class="fas fa-circle text-success"></i> 
+                    <span id="connection-status">Connected</span>
+                </span>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container-fluid mt-4">
+        <!-- Statistics Row -->
+        <div class="row mb-4">
+            <div class="col-md-3">
+                <div class="card stats-card">
+                    <div class="card-body text-center">
+                        <h3 id="total-detections">0</h3>
+                        <p class="mb-0">Total Detections</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stats-card">
+                    <div class="card-body text-center">
+                        <h3 id="recent-detections">0</h3>
+                        <p class="mb-0">Last 24 Hours</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stats-card">
+                    <div class="card-body text-center">
+                        <h3 id="emergency-count">0</h3>
+                        <p class="mb-0">Active Emergencies</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <div class="card stats-card">
+                    <div class="card-body text-center">
+                        <h3 id="webcam-tests">0</h3>
+                        <p class="mb-0">Webcam Tests</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row">
+            <!-- Real-time Detection Feed -->
+            <div class="col-md-8">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5><i class="fas fa-broadcast-tower"></i> Real-time Detection Feed</h5>
+                        <a href="/webcam" class="btn btn-primary btn-sm">
+                            <i class="fas fa-video"></i> Test with Webcam
+                        </a>
+                    </div>
+                    <div class="card-body real-time-feed" id="detection-feed">
+                        <div class="text-center text-muted">
+                            <i class="fas fa-info-circle"></i> No detections yet. 
+                            <a href="/webcam">Click here to test with webcam</a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Detection Analytics -->
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-header">
+                        <h5><i class="fas fa-chart-pie"></i> Detection Analytics</h5>
+                    </div>
+                    <div class="card-body">
+                        <canvas id="detectionChart" width="400" height="200"></canvas>
+                    </div>
+                </div>
+
+                <!-- Quick Actions -->
+                <div class="card mt-3">
+                    <div class="card-header">
+                        <h5><i class="fas fa-tools"></i> Quick Actions</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="d-grid gap-2">
+                            <a href="/webcam" class="btn btn-primary">
+                                <i class="fas fa-video"></i> Start Webcam Test
+                            </a>
+                            <button class="btn btn-outline-secondary" onclick="clearDetections()">
+                                <i class="fas fa-trash"></i> Clear All Detections
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Emergency Modal -->
+    <div class="modal fade" id="emergencyModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header bg-danger text-white">
+                    <h5 class="modal-title">
+                        <i class="fas fa-exclamation-triangle"></i> Emergency Alert
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="emergency-modal-body">
+                    <!-- Emergency details will be inserted here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Initialize Socket.IO
+        const socket = io();
+        
+        // Global variables
+        let detectionChart;
+        let emergencyCount = 0;
+        let webcamTestCount = 0;
+        
+        // Connection status
+        socket.on('connect', function() {
+            document.getElementById('connection-status').textContent = 'Connected';
+            document.getElementById('connection-status').parentElement.querySelector('.fas').className = 'fas fa-circle text-success';
+        });
+        
+        socket.on('disconnect', function() {
+            document.getElementById('connection-status').textContent = 'Disconnected';
+            document.getElementById('connection-status').parentElement.querySelector('.fas').className = 'fas fa-circle text-danger';
+        });
+        
+        // Handle new detections
+        socket.on('new_detection', function(detection) {
+            addDetectionToFeed(detection);
+            updateStats();
+            emergencyCount++;
+            document.getElementById('emergency-count').textContent = emergencyCount;
+            
+            // Count webcam tests
+            if (detection.drone_id === 'webcam_test') {
+                webcamTestCount++;
+                document.getElementById('webcam-tests').textContent = webcamTestCount;
+            }
+            
+            // Show emergency modal for high-confidence detections
+            if (detection.confidence > 0.7) {
+                showEmergencyModal(detection);
+            }
+        });
+        
+        // Initialize dashboard
+        document.addEventListener('DOMContentLoaded', function() {
+            loadDetections();
+            loadStats();
+            initializeChart();
+        });
+        
+        function loadDetections() {
+            fetch('/api/detections?limit=50')
+                .then(response => response.json())
+                .then(detections => {
+                    const feed = document.getElementById('detection-feed');
+                    feed.innerHTML = '';
+                    
+                    if (detections.length === 0) {
+                        feed.innerHTML = `
+                            <div class="text-center text-muted">
+                                <i class="fas fa-info-circle"></i> No detections yet. 
+                                <a href="/webcam">Click here to test with webcam</a>
+                            </div>
+                        `;
+                        return;
+                    }
+                    
+                    detections.forEach(detection => {
+                        addDetectionToFeed(detection);
+                        if (detection.drone_id === 'webcam_test') {
+                            webcamTestCount++;
+                        }
+                    });
+                    
+                    document.getElementById('webcam-tests').textContent = webcamTestCount;
+                });
+        }
+        
+        function loadStats() {
+            fetch('/api/stats')
+                .then(response => response.json())
+                .then(stats => {
+                    document.getElementById('total-detections').textContent = stats.total_detections;
+                    document.getElementById('recent-detections').textContent = stats.recent_detections;
+                    updateChart(stats.detections_by_type);
+                });
+        }
+        
+        function addDetectionToFeed(detection) {
+            const feed = document.getElementById('detection-feed');
+            
+            // Clear "no detections" message if it exists
+            if (feed.querySelector('.text-muted')) {
+                feed.innerHTML = '';
+            }
+            
+            const detectionCard = document.createElement('div');
+            detectionCard.className = 'card mb-2 detection-card';
+            
+            const timestamp = new Date(detection.timestamp).toLocaleString();
+            const confidencePercent = (detection.confidence * 100).toFixed(1);
+            
+            detectionCard.innerHTML = `
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-8">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div>
+                                    <span class="detection-type type-${detection.type}">${detection.type.replace('_', ' ').toUpperCase()}</span>
+                                    <span class="badge bg-secondary ms-2">${detection.drone_id}</span>
+                                </div>
+                                <small class="text-muted">${timestamp}</small>
+                            </div>
+                            <p class="mb-1 mt-2">${detection.reason || 'Emergency detected'}</p>
+                            <div class="d-flex justify-content-between align-items-center">
+                                <span class="text-muted">Confidence: ${confidencePercent}%</span>
+                                ${detection.location ? `<span class="text-muted">📍 ${detection.location[0].toFixed(4)}, ${detection.location[1].toFixed(4)}</span>` : ''}
+                            </div>
+                        </div>
+                        ${detection.image_path ? `
+                        <div class="col-md-4 text-end">
+                            <img src="/${detection.image_path}" class="detection-image" alt="Detection">
+                        </div>
+                        ` : ''}
+                    </div>
+                </div>
+            `;
+            
+            feed.insertBefore(detectionCard, feed.firstChild);
+            
+            // Keep only last 50 detections
+            const cards = feed.querySelectorAll('.card');
+            if (cards.length > 50) {
+                cards[cards.length - 1].remove();
+            }
+        }
+        
+        function initializeChart() {
+            const ctx = document.getElementById('detectionChart').getContext('2d');
+            detectionChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        data: [],
+                        backgroundColor: [
+                            '#ffc107', // car_crash
+                            '#dc3545', // fire
+                            '#6f42c1', // person_down
+                            '#fd7e14', // medical_emergency
+                            '#20c997'  // other
+                        ]
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            position: 'bottom'
+                        }
+                    }
+                }
+            });
+        }
+        
+        function updateChart(detectionsByType) {
+            const labels = Object.keys(detectionsByType).map(type => 
+                type.replace('_', ' ').toUpperCase()
+            );
+            const data = Object.values(detectionsByType);
+            
+            detectionChart.data.labels = labels;
+            detectionChart.data.datasets[0].data = data;
+            detectionChart.update();
+        }
+        
+        function showEmergencyModal(detection) {
+            const modalBody = document.getElementById('emergency-modal-body');
+            const timestamp = new Date(detection.timestamp).toLocaleString();
+            const confidencePercent = (detection.confidence * 100).toFixed(1);
+            
+            modalBody.innerHTML = `
+                <div class="alert alert-danger">
+                    <h6><i class="fas fa-exclamation-triangle"></i> ${detection.type.replace('_', ' ').toUpperCase()}</h6>
+                    <p class="mb-1"><strong>Drone:</strong> ${detection.drone_id}</p>
+                    <p class="mb-1"><strong>Confidence:</strong> ${confidencePercent}%</p>
+                    <p class="mb-1"><strong>Time:</strong> ${timestamp}</p>
+                    ${detection.location ? `<p class="mb-1"><strong>Location:</strong> ${detection.location[0].toFixed(4)}, ${detection.location[1].toFixed(4)}</p>` : ''}
+                    ${detection.reason ? `<p class="mb-0"><strong>Details:</strong> ${detection.reason}</p>` : ''}
+                </div>
+                ${detection.image_path ? `
+                <div class="text-center">
+                    <img src="/${detection.image_path}" class="img-fluid" alt="Detection Image">
+                </div>
+                ` : ''}
+            `;
+            
+            const modal = new bootstrap.Modal(document.getElementById('emergencyModal'));
+            modal.show();
+        }
+        
+        function updateStats() {
+            loadStats();
+        }
+        
+        function clearDetections() {
+            if (confirm('Are you sure you want to clear all detections?')) {
+                fetch('/api/clear_detections', { method: 'POST' })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            location.reload();
+                        }
+                    });
+            }
+        }
+        
+        // Auto-refresh every 30 seconds
+        setInterval(loadStats, 30000);
+    </script>
+</body>
+</html> 
